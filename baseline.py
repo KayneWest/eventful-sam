@@ -722,40 +722,42 @@ class EventfulAttention(torch.nn.Module):
                 window_size=None,
                 # EventfulTokenwiseBlock
                 gate_before_ln=False,
+                is_tokenwise=False,
             ):
         super().__init__()
+        """
+        :param dim: The number of dimensions in a token
+        :param heads: The number of attention heads (None for no
+        multi-headed attention)
+        :param input_size: The expected size of the inputs in tokens
+        :param mlp_ratio: The ratio of the MLP dimensionality to the
+        token dimensionality
+        :param ats_fraction: The fraction of tokens to retain if
+        using Adaptive Token Sampling (ATS)
+        :param drop_path_rate: Drop path ratio (for use when training)
+        :param relative_embedding_size: The size (in tokens) assumed for
+        relative position embeddings
+        :param matmul_2_cast: Typecast for the attention-value product
+        (None, "float16", or "bfloat16"). Helps save some memory when
+        using an A-gate, without a noticeable impact on accuracy.
+        :param pool_size: Pooling ratio to use with self-attention
+        pooling.
+        :param window_size: Self-attention window size (None to use
+        global, non-windowed attention).
+        """
         # (h, w)
-        assert isinstance(resolution, tuple) and len(resolution) == 2
+        ### assert isinstance(resolution, tuple) and len(resolution) == 2
         self.num_heads = num_heads
+
+        self.is_tokenwise = is_tokenwise
+        if is_tokenwise: pool_size = None
 
         #_defaults:
         # - "vitdet_b_coco.yml"
         #model:
         # classes: 30
         # detectron2_config: "configs/detectron/vitdet_b_vid.py"
-
-        '''
-        :vitdet_b_coco:
-        model:
-        classes: 80
-        detectron2_config: "configs/detectron/vitdet_b_coco.py"
-        input_shape: [3, 1024, 1024]
-        normalize_mean: [123.675, 116.28, 103.53]
-        normalize_std: [58.395, 57.12, 57.375]
-        output_channels: 256
-        patch_size: [16, 16]
-        scale_factors: [4.0, 2.0, 1.0, 0.5]
-        backbone_config:
-            depth: 12
-            position_encoding_size: [14, 14]
-            window_indices: [0, 1, 3, 4, 6, 7, 9, 10]
-            block_config:
-            dim: 768
-            relative_embedding_size: [64, 64]
-            heads: 12
-            mlp_ratio: 4
-            window_size: [14, 14]
-        '''
+        
         #self.scale = key_dim ** -0.5
         #self.key_dim = key_dim
         #self.nh_kd = nh_kd = key_dim * num_heads
@@ -796,7 +798,7 @@ class EventfulAttention(torch.nn.Module):
         self.input_size = tuple(input_size)
         
         if ats_fraction is not None:
-            assert pool_size is None
+            ass is None
             assert window_size is None
             assert not (ats_fraction < 0.0 or ats_fraction > 1.0)
         # assert not (drop_path_rate < 0.0 or drop_path_rate > 1.0)
@@ -1092,7 +1094,7 @@ class EventfulAttention(torch.nn.Module):
         x = self.projection_accumulator(x, index)
         return x
 
-    def forward(self, x):
+    def forward_eventful(self, x):
         skip_1, x, index = self._forward_pre_attention(x)
         x = self.qkv_accumulator(x, index)
         x, ats_indices = self._forward_attention((x, index))
@@ -1198,8 +1200,9 @@ class EventfulAttention(torch.nn.Module):
         # (batch, heads, token, dim / heads)
 
         # Token pooling is a noop if self.pool_size is None.
-        k = self._pool_tokens(k)
-        v = self._pool_tokens(v)
+        # I think we just don't even do this op.
+        #k = self._pool_tokens(k)
+        #v = self._pool_tokens(v)
 
         # Perform the actual attention computation.
         # The output of this first matmul is huge - hence it's much
@@ -1266,6 +1269,10 @@ class EventfulAttention(torch.nn.Module):
         x = self.qkv(x)
         return skip_1, x, index
 
+    def forward(self, x):
+        if self.is_tokenwise: return self.forward_tokenwise(x)
+        else: self.forward_eventful(x)
+
 class EvenfulTinyViTBlock(nn.Module):
     r""" TinyViT Block.
 
@@ -1282,14 +1289,28 @@ class EvenfulTinyViTBlock(nn.Module):
         activation: the activation function. Default: nn.GELU
     """
 
-    def __init__(self, dim, input_resolution, num_heads, window_size=7,
-                 mlp_ratio=4., drop=0., drop_path=0.,
-                 local_conv_size=3,
-                 activation=nn.GELU,
-                 ):
+    def __init__(self, 
+        dim, 
+        input_size, 
+        num_heads=8, 
+        window_size=7,
+        mlp_ratio=4., 
+        drop=0., 
+        drop_path=0.,
+        local_conv_size=3,
+        activation=nn.GELU,
+
+        ats_fraction=None,
+        relative_embedding_size=None,
+        matmul_2_cast=None,
+        pool_size=None,
+        gate_before_ln=False,
+        is_tokenwise=False
+
+    ):
         super().__init__()
         self.dim = dim
-        self.input_resolution = input_resolution
+        self.input_size = input_size
         self.num_heads = num_heads
         assert window_size > 0, 'window_size must be greater than 0'
         self.window_size = window_size
@@ -1301,9 +1322,13 @@ class EvenfulTinyViTBlock(nn.Module):
         assert dim % num_heads == 0, 'dim must be divisible by num_heads'
         head_dim = dim // num_heads
 
-        window_resolution = (window_size, window_size)
-        self.attn = EventfulAttention(dim, head_dim, num_heads,
-                              attn_ratio=1, resolution=window_resolution)
+        window_resolution = (window_size, window_size)# window_size
+        self.attn = EventfulAttention(
+                dim, input_size, num_heads, ats_fraction,
+                relative_embedding_size, matmul_2_cast,
+                pool_size, window_size, gate_before_ln,
+                is_tokenwise,
+            )
 
         mlp_hidden_dim = int(dim * mlp_ratio)
         mlp_activation = activation
@@ -1320,7 +1345,7 @@ class EvenfulTinyViTBlock(nn.Module):
         self.mlp_accumulator = TokenBuffer()
 
     def forward(self, x):
-        H, W = self.input_resolution
+        H, W = self.input_size
         B, L, C = x.shape
         if H == self.window_size and W == self.window_size:
             x, skip_1 = self.attn(x)
@@ -1352,7 +1377,7 @@ class EvenfulTinyViTBlock(nn.Module):
         return x
 
     def extra_repr(self) -> str:
-        return f"dim={self.dim}, input_resolution={self.input_resolution}, num_heads={self.num_heads}, " \
+        return f"dim={self.dim}, input_size={self.input_size}, num_heads={self.num_heads}, " \
                f"window_size={self.window_size}, mlp_ratio={self.mlp_ratio}"
 
 class EventfulBasicLayer(nn.Module):
@@ -1374,13 +1399,29 @@ class EventfulBasicLayer(nn.Module):
         out_dim: the output dimension of the layer. Default: dim
     """
 
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size,
-                 mlp_ratio=4., drop=0.,
-                 drop_path=0., downsample=None, use_checkpoint=False,
+    def __init__(self, 
+                 dim, 
+                 input_resolution,
+                 depth,
+                 num_heads,
+                 window_size,
+                 mlp_ratio=4., 
+                 drop=0.,
+                 drop_path=0., 
+                 downsample=None, 
+                 use_checkpoint=False,
                  local_conv_size=3,
                  activation=nn.GELU,
                  out_dim=None,
-                 ):
+                 # these are going to have to be manually set
+                 # some how...
+                 ats_fraction=None,
+                 relative_embedding_size=None,
+                 matmul_2_cast=None,
+                 pool_size=None,
+                 gate_before_ln=False,
+                 is_tokenwise=False,
+                ):
 
         super().__init__()
         self.dim = dim
@@ -1390,7 +1431,7 @@ class EventfulBasicLayer(nn.Module):
 
         # build blocks
         self.blocks = nn.ModuleList([
-            EvenfulTinyViTBlock(dim=dim, input_resolution=input_resolution,
+            EvenfulTinyViTBlock(dim=dim, input_size=input_resolution,
                          num_heads=num_heads, window_size=window_size,
                          mlp_ratio=mlp_ratio,
                          drop=drop,
@@ -1398,7 +1439,13 @@ class EventfulBasicLayer(nn.Module):
                              drop_path, list) else drop_path,
                          local_conv_size=local_conv_size,
                          activation=activation,
-                         )
+                         ats_fraction=ats_fraction,
+                         relative_embedding_size=relative_embedding_size,
+                         matmul_2_cast=matmul_2_cast,
+                         pool_size=pool_size,
+                         gate_before_ln=gate_before_ln,
+                         is_tokenwise=is_tokenwise
+                        )
             for i in range(depth)])
 
         # patch merging layer
@@ -1435,20 +1482,102 @@ class LayerNorm2d(nn.Module):
         x = self.weight[:, None, None] * x + self.bias[:, None, None]
         return x
 
+'''
+    img_size=img_size[0], 
+    in_chans=3, # in_channels
+    num_classes=1000,
+    embed_dims=[64, 128, 160, 320],
+    depths=[2, 2, 6, 2],
+    num_heads=[2, 4, 5, 10],
+    window_sizes=[7, 7, 14, 7],
+    mlp_ratio=4.,
+    drop_rate=0.,
+    drop_path_rate=0.0,
+    use_checkpoint=False,
+    mbconv_expand_ratio=4.0,
+    local_conv_size=3,
+    layer_lr_decay=0.8
+'''
+
 class EventfulTinyViT(nn.Module):
-    def __init__(self, img_size=224, in_chans=3, num_classes=1000,
-                 embed_dims=[96, 192, 384, 768], depths=[2, 2, 6, 2],
-                 num_heads=[3, 6, 12, 24],
+    def __init__(self, 
+                 img_size=224, 
+                 in_chans=3, 
+                 num_classes=1000,
+                 embed_dims=[64, 128, 160, 320], 
+                 depths=[2, 2, 6, 2],
+                 num_heads=[2, 4, 5, 10],
                  window_sizes=[7, 7, 14, 7],
                  mlp_ratio=4.,
                  drop_rate=0.,
-                 drop_path_rate=0.1,
+                 drop_path_rate=0.0,
                  use_checkpoint=False,
                  mbconv_expand_ratio=4.0,
                  local_conv_size=3,
-                 layer_lr_decay=1.0,
+                 layer_lr_decay=0.8,
+                 ats_fraction=None,
+                 relative_embedding_size=[64,64], # might be smaller
+                 matmul_2_cast=None,
+                 pool_size=2,
+                 gate_before_ln=False
+
                  ):
         super().__init__()
+
+        '''
+        tinyvit
+        window_indices: 
+
+
+        :vitdet_b_coco:
+        model:
+        classes: 80
+        detectron2_config: "configs/detectron/vitdet_b_coco.py"
+        input_shape: [3, 1024, 1024]
+        normalize_mean: [123.675, 116.28, 103.53]
+        normalize_std: [58.395, 57.12, 57.375]
+        output_channels: 256
+        patch_size: [16, 16]
+        scale_factors: [4.0, 2.0, 1.0, 0.5]
+        backbone_config:
+            depth: 12
+            position_encoding_size: [14, 14]
+            # i think these are where h/w != //0
+            window_indices: [0, 1, 3, 4, 6, 7, 9, 10]
+            # lets get these window indices
+            block_config:
+            dim: 768
+            relative_embedding_size: [64, 64]
+            heads: 12
+            mlp_ratio: 4
+            window_size: [14, 14]
+        model:
+        backbone_config:
+            block_config:
+                pool_size: 2
+            #TODO: how to set this variable iteratively?
+            windowed_overrides:
+                pool_size: null
+        token_top_k: [512]
+        for k in config.get("token_top_k", []):
+            set_policies(model, TokenNormTopK, k=k)
+            do_evaluation(f"Token top k={k}")
+
+        for i in range(depth):
+            block_class_i = block_class # EventfulBlock
+            block_config_i = block_config.copy()
+            if i in window_indices: # EventfulTokenwiseBlock
+                if windowed_class is not None:
+                    block_class_i = windowed_class
+                if windowed_overrides is not None:
+                    block_config_i =  block_config_i or windowed_overrides # |= windowed_overrides 
+            else:
+                block_config_i["window_size"] = None
+            self.blocks.append(
+                getattr(blocks, block_class_i)(input_size=input_size, **block_config_i)
+            )
+        '''
+
         self.img_size=img_size
         self.num_classes = num_classes
         self.depths = depths
@@ -1470,8 +1599,11 @@ class EventfulTinyViT(nn.Module):
                                                 sum(depths))]  # stochastic depth decay rule
 
         # build layers
+        # window_indices: [0, 1, 3, 4, 6, 7, 9, 10] ? [0, 1, 2, 3] for tinyvit
+        indicies = []
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
+            # is_tokenwise = False
             kwargs = dict(dim=embed_dims[i_layer],
                         input_resolution=(patches_resolution[0] // (2 ** (i_layer-1 if i_layer == 3 else i_layer)),
                                 patches_resolution[1] // (2 ** (i_layer-1 if i_layer == 3 else i_layer))),
@@ -1485,7 +1617,18 @@ class EventfulTinyViT(nn.Module):
                           out_dim=embed_dims[min(
                               i_layer + 1, len(embed_dims) - 1)],
                           activation=activation,
-                          )
+                          ats_fraction=ats_fraction,
+                          relative_embedding_size=relative_embedding_size,
+                          is_tokenwise=False,
+                          pool_size=pool_size, # default poolsize
+                          matmul_2_cast=matmul_2_cast,
+                          gate_before_ln=gate_before_ln
+                        )
+            if kwargs['input_resolution'][0] != kwargs['window_size']:
+                indicies.append(i_layer)
+                 #is_tokenwise = True
+                kwargs['is_tokenwise'] = True
+
             if i_layer == 0:
                 layer = ConvLayer(
                     conv_expand_ratio=mbconv_expand_ratio,
